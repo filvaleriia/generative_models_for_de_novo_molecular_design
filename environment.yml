@@ -1,0 +1,20 @@
+name: scaffold-based-metrics-env
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.9,<3.11
+  - rdkit
+  - numpy<2
+  - pandas
+  - scipy
+  - scikit-learn
+  - scikit-learn-extra
+  - seaborn
+  - matplotlib
+  - openpyxl
+  - tqdm
+  - umap-learn
+  - ipython
+  - jupyterlab
+  - ipykernel
+  - pip
