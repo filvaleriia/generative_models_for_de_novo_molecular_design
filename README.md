@@ -300,6 +300,10 @@ data/
 
 The `output_sets/` directory also contains historical subset runs such as `_10k`, `_62.5k`, `_100k`, `_125k`, `_250k`, `_300k`, and `_500k`. The main dissertation workflows described in this README use the canonical full-set generator folders unless a notebook or command explicitly selects a subset.
 
+The archived data package for this repository is available on Zenodo: [10.5281/zenodo.19466540](https://doi.org/10.5281/zenodo.19466540). The complete archive is large (approximately `34 GB`), so downloading it may take some time and sufficient local storage is required.
+
+Note: precomputed RDKit pharmacophore fingerprint files are not included in the archived data package because of their large size. They can be regenerated locally with `src/compute_pharmacophore_fingerprints.py` before running the pharmacophore-based workflow.
+
 ## ▶️ Running the Metric Calculations
 
 The recommended way to run the project is through notebooks, with all heavy lifting delegated to `src/`.
