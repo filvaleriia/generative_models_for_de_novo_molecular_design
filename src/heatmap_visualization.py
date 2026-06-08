@@ -39,6 +39,7 @@ def save_current_figure(
     plt.savefig(output_dir / f"{name}.png", format="png", dpi=300, **common_kwargs)
     if include_pdf:
         plt.savefig(output_dir / f"{name}.pdf", **common_kwargs)
+        plt.savefig(output_dir / f"{name}.tiff", dpi=150, **common_kwargs)
 
 def preprocesing(type_cluster, type_unit, generators_name_list, receptor, data_folder, ph4 = False, user_threshold = 1):
     '''
@@ -266,6 +267,8 @@ def plot_all_subsets(subset_dict, title='', receptor='', name_save='', cmap='vir
             .replace('_epsilon', '\n epsilon')
             .replace('_mut_r', '\n mut_r')
             .replace('addcarbon', 'AddCarbon')
+            .replace('enamine', 'Enamine')
+            .replace('_mean', '')
             for label in ax.get_yticklabels()
         ]
         new_labels = [
@@ -450,6 +453,7 @@ def plot_heatmaps_with_diff_from_baseline(baseline_df_all, data_dict, type_split
             .replace('_epsilon', '\n epsilon')
             .replace('_mut_r', '\n mut_r')
             .replace('addcarbon', 'AddCarbon')
+            .replace('enamine', 'Enamine')
             for label in ax.get_yticklabels()
         ]
         new_labels = [
@@ -1347,7 +1351,7 @@ def plot_combined_heatmap_with_single_column_for_each_metric_rotated_binned_phar
         metrics=['RS', 'SED', 'ASER'],
         title=None, save_name=None, using_norm_values=False,
         data_folder='', save_folder='',
-        inter_metric_wspace=0.15,
+        inter_metric_wspace=0.3,
         intra_metric_wspace=0.05,
         user_threshold = 0.7,
         threshold_sim = None,  # Threshold for 'sim' split

@@ -13,14 +13,16 @@ from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 from rdkit import Chem
 from rdkit.Chem.Scaffolds.MurckoScaffold import MakeScaffoldGeneric, MurckoScaffoldSmiles
 from tqdm import tqdm
 
 try:
-    from src.path_utils import bootstrap_outputs_dir, resolve_data_folder
+    from src.path_utils import BOOTSTRAP_OUTPUTS_DIRNAME, bootstrap_outputs_dir, resolve_data_folder
 except ModuleNotFoundError:  # pragma: no cover - CLI execution from repo root
-    from path_utils import bootstrap_outputs_dir, resolve_data_folder
+    from path_utils import BOOTSTRAP_OUTPUTS_DIRNAME, bootstrap_outputs_dir, resolve_data_folder
 
 METRICS = ("RS", "SED", "ASER")
 DEFAULT_PH4_THRESHOLDS = {"dis": 0.7, "sim": 0.8}
@@ -49,6 +51,44 @@ DEFAULT_PH4_GENERATORS = [
     "GB_GA_mut_r_0.5",
     "REINVENT",
     "enamine",
+]
+FOREST_GENERATOR_ORDER = {
+    "scaffold": [
+        "Molpher",
+        "REINVENT",
+        "DrugEx_GT_epsilon_0.1",
+        "DrugEx_GT_epsilon_0.6",
+        "DrugEx_RNN_epsilon_0.1",
+        "DrugEx_RNN_epsilon_0.6",
+        "GB_GA_mut_r_0.01",
+        "GB_GA_mut_r_0.5",
+        "GB_GA_log_p_mut_r_0.01",
+        "GB_GA_log_p_mut_r_0.5",
+        "addcarbon",
+    ],
+    "ph4": [
+        "Molpher",
+        "REINVENT",
+        "DrugEx_GT_epsilon_0.1",
+        "DrugEx_GT_epsilon_0.6",
+        "DrugEx_RNN_epsilon_0.1",
+        "DrugEx_RNN_epsilon_0.6",
+        "GB_GA_mut_r_0.01",
+        "GB_GA_mut_r_0.5",
+        "GB_GA_log_p_mut_r_0.01",
+        "GB_GA_log_p_mut_r_0.5",
+        "enamine",
+    ],
+}
+FOREST_ROW_TITLES = {
+    "csk_scaffolds": "STRUCTURAL REPRESENTATION: CSK",
+    "murcko_scaffolds": "STRUCTURAL REPRESENTATION: MURCKO",
+    "rdkit_ph4_fps": "STRUCTURAL REPRESENTATION: Pharmacophore fingerprints",
+}
+PAIRWISE_ROW_CONFIGS = [
+    ("scaffold", "csk", "STRUCTURAL REPRESENTATION: CSK"),
+    ("scaffold", "murcko", "STRUCTURAL REPRESENTATION: MURCKO"),
+    ("ph4", "rdkit", "STRUCTURAL REPRESENTATION: Pharmacophore fingerprints"),
 ]
 
 
@@ -84,6 +124,10 @@ class BootstrapThresholdConfig:
         if self.normalized_family() == "scaffold":
             return self.repo_root() / "effect_size_thresholds_scaffolds.csv"
         return self.repo_root() / "effect_size_thresholds_ph4_rdkit.csv"
+
+
+def bootstrap_root_dir(data_folder: str | Path | None = "../../") -> Path:
+    return resolve_data_folder(data_folder).joinpath("data", BOOTSTRAP_OUTPUTS_DIRNAME)
 
 
 def _threshold_for_split(split: str) -> float:
@@ -966,6 +1010,309 @@ def default_generators_for_family(metric_family: str) -> list[str]:
     if family == "ph4":
         return list(DEFAULT_PH4_GENERATORS)
     raise ValueError("metric_family must be 'scaffold' or 'ph4'.")
+
+
+def _forest_pretty_generator_name(name: str) -> str:
+    return (
+        name.replace("_epsilon", "\n epsilon")
+        .replace("_mut_r", "\n mut_r")
+        .replace("addcarbon", "AddCarbon")
+        .replace("enamine", "Enamine")
+    )
+
+
+def _forest_style_axis(ax, metric_df: pd.DataFrame, color_map: dict[str, tuple], metric: str, show_ylabels: bool = True) -> None:
+    y = np.arange(len(metric_df))
+    for i, row in metric_df.iterrows():
+        color = color_map[row["generator"]]
+        ax.hlines(i, row["q025"], row["q975"], color=color, linewidth=5.5, alpha=0.70)
+        ax.scatter(row["median"], i, color=color, s=240, zorder=3)
+
+    ax.set_yticks(y)
+    if show_ylabels:
+        ax.set_yticklabels(metric_df["generator_display"], fontsize=22)
+    else:
+        ax.set_yticklabels([])
+    ax.invert_yaxis()
+    ax.set_xlabel(r"Value ($\times 10^{-2}$)" if metric == "ASER" else "Value", fontsize=24, fontweight="normal")
+    ax.set_title(metric, fontsize=27, fontweight="normal", pad=10)
+    ax.tick_params(axis="x", labelsize=20)
+    ax.tick_params(axis="y", length=0, pad=10)
+    ax.grid(True, axis="x", alpha=0.20, linestyle="--")
+    ax.grid(False, axis="y")
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def _build_forest_summary_from_arrays(
+    arrays_by_generator_metric: dict[tuple[str, str], list[np.ndarray]],
+    generator_order: Sequence[str],
+    metrics: Sequence[str],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for generator_name in generator_order:
+        for metric in metrics:
+            values_list = arrays_by_generator_metric.get((generator_name, metric), [])
+            if not values_list:
+                continue
+            values = np.concatenate(values_list)
+            scale = 100.0 if metric == "ASER" else 1.0
+            rows.append(
+                {
+                    "generator": generator_name,
+                    "generator_display": _forest_pretty_generator_name(generator_name),
+                    "metric": metric,
+                    "median": float(np.median(values) * scale),
+                    "q025": float(np.quantile(values, 0.025) * scale),
+                    "q975": float(np.quantile(values, 0.975) * scale),
+                    "mean": float(np.mean(values) * scale),
+                    "std": float(np.std(values, ddof=1) * scale) if len(values) > 1 else 0.0,
+                }
+            )
+
+    summary_df = pd.DataFrame(rows)
+    if summary_df.empty:
+        raise ValueError("No bootstrap sample arrays found for requested configuration.")
+    return summary_df
+
+
+def _draw_forest_plot(
+    summary_df: pd.DataFrame,
+    generator_order: Sequence[str],
+    metrics: Sequence[str],
+    output_path_prefix: Path,
+    dpi: int = 300,
+) -> None:
+    palette = sns.color_palette("tab20", n_colors=max(len(generator_order), 1))
+    color_map = {name: palette[idx] for idx, name in enumerate(generator_order)}
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(11 * len(metrics), 15), sharey=False)
+    if len(metrics) == 1:
+        axes = [axes]
+
+    for ax, metric in zip(axes, metrics):
+        metric_df = summary_df[summary_df["metric"] == metric].copy()
+        metric_df["generator"] = pd.Categorical(metric_df["generator"], categories=generator_order, ordered=True)
+        metric_df = metric_df.sort_values("generator").reset_index(drop=True)
+        _forest_style_axis(ax, metric_df, color_map, metric, show_ylabels=True)
+
+    plt.tight_layout()
+    plt.savefig(f"{output_path_prefix}.png", dpi=dpi, bbox_inches="tight")
+    plt.savefig(f"{output_path_prefix}.svg", bbox_inches="tight")
+    plt.show()
+
+
+def _load_split_summary(
+    bootstrap_root: Path,
+    metric_family: str,
+    receptor: str,
+    unit_type: str,
+    split: str,
+    metrics: Sequence[str],
+    generator_order: Sequence[str],
+) -> pd.DataFrame:
+    family_root = bootstrap_root / metric_family / receptor / unit_type / split
+    if not family_root.exists():
+        raise FileNotFoundError(f"Missing bootstrap directory: {family_root}")
+
+    arrays: dict[tuple[str, str], list[np.ndarray]] = {}
+    for generator_name in generator_order:
+        for metric in metrics:
+            sample_path = family_root / generator_name / "bootstrap_samples" / f"{metric}.npy"
+            if sample_path.exists():
+                arrays.setdefault((generator_name, metric), []).append(np.load(sample_path))
+
+    return _build_forest_summary_from_arrays(arrays, generator_order, metrics)
+
+
+def plot_bootstrap_forest_all_receptors_pooled(
+    receptors: Sequence[str] = ("Glucocorticoid_receptor", "Leukocyte_elastase"),
+    splits: Sequence[str] = ("dis", "sim"),
+    metrics: Sequence[str] = ("RS", "SED", "ASER"),
+    output_dir: Path | None = None,
+    data_folder: str | Path | None = "../../",
+    dpi: int = 300,
+) -> dict[str, pd.DataFrame]:
+    bootstrap_root = bootstrap_root_dir(data_folder)
+    if output_dir is None:
+        output_dir = bootstrap_root
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    row_configs = [
+        ("scaffold", "csk_scaffolds", FOREST_GENERATOR_ORDER["scaffold"]),
+        ("scaffold", "murcko_scaffolds", FOREST_GENERATOR_ORDER["scaffold"]),
+        ("ph4", "rdkit_ph4_fps", FOREST_GENERATOR_ORDER["ph4"]),
+    ]
+
+    row_summaries = []
+    for metric_family, unit_type, generator_order in row_configs:
+        arrays: dict[tuple[str, str], list[np.ndarray]] = {}
+        for receptor in receptors:
+            for split in splits:
+                family_root = bootstrap_root / metric_family / receptor / unit_type / split
+                if not family_root.exists():
+                    continue
+                for generator_name in generator_order:
+                    for metric in metrics:
+                        sample_path = family_root / generator_name / "bootstrap_samples" / f"{metric}.npy"
+                        if sample_path.exists():
+                            arrays.setdefault((generator_name, metric), []).append(np.load(sample_path))
+        summary_df = _build_forest_summary_from_arrays(arrays, generator_order, metrics)
+        row_summaries.append((metric_family, unit_type, generator_order, summary_df))
+
+    max_generators = max(len(generator_order) for _, _, generator_order, _ in row_summaries)
+    fig, axes = plt.subplots(
+        len(row_summaries),
+        len(metrics),
+        figsize=(11 * len(metrics), 5 + 1.35 * max_generators * len(row_summaries)),
+        sharey=False,
+    )
+    if len(row_summaries) == 1:
+        axes = np.array([axes])
+
+    for row_idx, (_, unit_type, generator_order, summary_df) in enumerate(row_summaries):
+        palette = sns.color_palette("tab20", n_colors=max(len(generator_order), 1))
+        color_map = {name: palette[idx] for idx, name in enumerate(generator_order)}
+
+        for col_idx, metric in enumerate(metrics):
+            ax = axes[row_idx, col_idx]
+            metric_df = summary_df[summary_df["metric"] == metric].copy()
+            metric_df["generator"] = pd.Categorical(metric_df["generator"], categories=generator_order, ordered=True)
+            metric_df = metric_df.sort_values("generator").reset_index(drop=True)
+            _forest_style_axis(ax, metric_df, color_map, metric, show_ylabels=(col_idx == 0))
+
+    fig.subplots_adjust(top=0.95, bottom=0.05, hspace=0.23, wspace=0.18)
+
+    for row_idx, (_, unit_type, _, _) in enumerate(row_summaries):
+        row_axes = axes[row_idx, :]
+        first_pos = row_axes[0].get_position()
+        last_pos = row_axes[-1].get_position()
+        x_center = (first_pos.x0 + last_pos.x1) / 2
+        y_top = first_pos.y1 + 0.02
+        fig.text(
+            x_center,
+            y_top,
+            FOREST_ROW_TITLES[unit_type],
+            ha="center",
+            va="bottom",
+            fontsize=27,
+            fontweight="semibold",
+        )
+
+    filename = output_dir / "bootstrap_forest_all_receptors_pooled_dis_sim"
+    plt.savefig(f"{filename}.png", dpi=dpi, bbox_inches="tight")
+    plt.savefig(f"{filename}.svg", bbox_inches="tight")
+    plt.show()
+    return {unit_type: summary_df for _, unit_type, _, summary_df in row_summaries}
+
+
+def _load_pairwise_effect_sizes(bootstrap_root: Path, metric_family: str) -> pd.DataFrame:
+    if metric_family == "scaffold":
+        path = bootstrap_root / "scaffold" / "bootstrap_pairwise_tests_scaffolds.csv"
+    elif metric_family == "ph4":
+        path = bootstrap_root / "ph4" / "bootstrap_pairwise_tests_ph4.csv"
+    else:
+        raise ValueError("metric_family must be 'scaffold' or 'ph4'.")
+
+    if not path.exists():
+        raise FileNotFoundError(f"Missing pairwise tests file: {path}")
+    return pd.read_csv(path)
+
+
+def plot_empirical_effect_size_distributions_pooled(
+    output_dir: Path | None = None,
+    metrics: Sequence[str] = ("RS", "SED", "ASER"),
+    data_folder: str | Path | None = "../../",
+    dpi: int = 300,
+) -> pd.DataFrame:
+    bootstrap_root = bootstrap_root_dir(data_folder)
+    if output_dir is None:
+        output_dir = bootstrap_root
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    scaffold_df = _load_pairwise_effect_sizes(bootstrap_root, "scaffold")
+    ph4_df = _load_pairwise_effect_sizes(bootstrap_root, "ph4")
+    family_map = {"scaffold": scaffold_df, "ph4": ph4_df}
+
+    fig, axes = plt.subplots(3, len(metrics), figsize=(13 * len(metrics), 18), sharey=False)
+    fig.subplots_adjust(top=0.95, bottom=0.06, hspace=0.6, wspace=0.18)
+
+    distribution_summary: list[dict[str, object]] = []
+    quartile_colors = {"q25": "#4C78A8", "q50": "#F58518", "q75": "#54A24B"}
+
+    for row_idx, (metric_family, unit_type, row_title) in enumerate(PAIRWISE_ROW_CONFIGS):
+        df = family_map[metric_family].copy()
+        subset = df[df["unit_type"] == unit_type].copy()
+        if subset.empty:
+            raise ValueError(f"No pairwise effect-size rows found for family={metric_family}, unit_type={unit_type}")
+
+        row_axes = []
+        for col_idx, metric in enumerate(metrics):
+            ax = axes[row_idx, col_idx]
+            metric_df = subset[subset["metric"] == metric].copy()
+            values = metric_df["abs_delta_mean"].dropna().to_numpy(dtype=float)
+            if values.size == 0:
+                raise ValueError(
+                    f"No abs_delta_mean values for family={metric_family}, unit_type={unit_type}, metric={metric}"
+                )
+
+            scale = 100.0 if metric == "ASER" else 1.0
+            values_scaled = values * scale
+            q25, q50, q75 = np.quantile(values_scaled, [0.25, 0.50, 0.75])
+
+            distribution_summary.append(
+                {
+                    "metric_family": metric_family,
+                    "unit_type": unit_type,
+                    "metric": metric,
+                    "q25": q25,
+                    "q50": q50,
+                    "q75": q75,
+                }
+            )
+
+            sns.histplot(values_scaled, bins=18, stat="density", color="#9ECAE1", alpha=0.55, edgecolor="white", ax=ax)
+            sns.kdeplot(values_scaled, color="#2C7FB8", linewidth=2.5, ax=ax, fill=False)
+            ax.axvline(q25, color=quartile_colors["q25"], linestyle="--", linewidth=2.3)
+            ax.axvline(q50, color=quartile_colors["q50"], linestyle="--", linewidth=2.3)
+            ax.axvline(q75, color=quartile_colors["q75"], linestyle="--", linewidth=2.3)
+
+            if metric == "ASER":
+                ax.set_xlabel(r"Absolute pairwise mean difference ($\times 10^{-2}$)", fontsize=24, fontweight="normal")
+            else:
+                ax.set_xlabel("Absolute pairwise mean difference", fontsize=24, fontweight="normal")
+            ax.set_ylabel("Density", fontsize=23, fontweight="normal")
+            ax.set_title(metric, fontsize=28, fontweight="normal", pad=10)
+            ax.tick_params(axis="both", labelsize=21)
+            ax.grid(True, axis="y", alpha=0.18, linestyle="--")
+            ax.grid(False, axis="x")
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.text(
+                0.98,
+                0.96,
+                f"25%={q25:.3f}\n50%={q50:.3f}\n75%={q75:.3f}",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=20,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.82, edgecolor="none"),
+            )
+            row_axes.append(ax)
+
+        first_pos = row_axes[0].get_position()
+        last_pos = row_axes[-1].get_position()
+        x_center = (first_pos.x0 + last_pos.x1) / 2
+        y_top = first_pos.y1 + 0.04
+        fig.text(x_center, y_top, row_title, ha="center", va="bottom", fontsize=27, fontweight="semibold")
+
+    filename = output_dir / "empirical_effect_size_distribution_all_receptors_pooled_dis_sim"
+    plt.savefig(f"{filename}.png", dpi=dpi, bbox_inches="tight")
+    plt.savefig(f"{filename}.svg", bbox_inches="tight")
+    plt.show()
+
+    return pd.DataFrame(distribution_summary)
 
 
 def build_argparser() -> argparse.ArgumentParser:

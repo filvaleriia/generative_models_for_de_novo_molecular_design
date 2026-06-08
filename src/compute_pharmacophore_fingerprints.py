@@ -7,12 +7,20 @@ import datetime as dt
 import gc
 from multiprocessing import Pool
 from pathlib import Path
+import sys
 from typing import Iterable
 
 from rdkit import Chem, RDConfig
 from rdkit.Chem import ChemicalFeatures
 from rdkit.Chem.Pharm2D import Generate
 from rdkit.Chem.Pharm2D.SigFactory import SigFactory
+
+# Allow both:
+#   python -m src.compute_pharmacophore_fingerprints
+# and:
+#   python src/compute_pharmacophore_fingerprints.py
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.path_utils import data_subdir, resolve_data_folder
 

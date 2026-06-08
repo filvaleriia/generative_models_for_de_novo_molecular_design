@@ -33,6 +33,8 @@ warnings.filterwarnings('ignore')
 
 
 from scipy.spatial.distance import jaccard
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 import umap
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -50,6 +52,8 @@ DEFAULT_THRESHOLDS = {
 
 DEFAULT_UMAP_ACTIVE_CATEGORY_SAMPLE = 5000
 DEFAULT_UMAP_NON_ACTIVE_SAMPLE = 5000
+DEFAULT_MORGAN_RADIUS = 3
+DEFAULT_MORGAN_NBITS = 4096
 
 
 def _data_root(base_path: str) -> str:
@@ -65,6 +69,10 @@ def _overlap_dir(base_path: str, receptor: str, *parts: str) -> str:
 
 def _umap_dir(base_path: str, receptor: str, *parts: str) -> str:
     return os.path.join(_data_root(base_path), "comparison_outputs", "umap", receptor, *parts)
+
+
+def _tsne_dir(base_path: str, receptor: str, *parts: str) -> str:
+    return os.path.join(_data_root(base_path), "comparison_outputs", "tsne", receptor, *parts)
 
 
 def _figure_dir(base_path: str, *parts: str) -> str:
@@ -143,14 +151,18 @@ def _build_umap_input_dataframe(
 
     umap_input = pd.concat(datasets, ignore_index=True)
     counts = umap_input["activity_category"].value_counts().to_dict()
-    print("UMAP category counts:")
+    print("Embedding category counts:")
     for label in ["IS", "RS", "both_active", "only_scaf", "only_fp", "non_active"]:
         if label in counts:
             print(f"  {label}: {counts[label]}")
     return umap_input
 
 
-def smiles_to_morgan(smiles: str, radius: int = 3, nbits: int = 2048) -> np.ndarray:
+def smiles_to_morgan(
+    smiles: str,
+    radius: int = DEFAULT_MORGAN_RADIUS,
+    nbits: int = DEFAULT_MORGAN_NBITS,
+) -> np.ndarray:
     """Convert SMILES to Morgan fingerprint as numpy array using MorganGenerator."""
     try:
         mol = Chem.MolFromSmiles(smiles)
@@ -1544,8 +1556,10 @@ def plot_activity_barplots(
         receptor: Receptor name
         user_threshold: Optional shared similarity threshold override
         base_path: Base data path
-        categories: List of categories to plot (default: all)
-                   Options: ['both_active', 'only_scaf', 'only_fp', 'non_active']
+        categories: List of categories to plot (default: main active categories)
+                   Internal options: ['both_active', 'only_scaf', 'only_fp', 'non_active']
+                   Display aliases are also accepted:
+                   ['both-active', 'scaffold-only', 'ph4-only', 'non-active']
         use_percentage: If True, plot percentages; if False, plot absolute numbers
         total_count: Total number of compounds (for percentage calculation)
         dis_threshold: Threshold for dis split
@@ -1555,9 +1569,33 @@ def plot_activity_barplots(
     threshold_dir = build_threshold_dirname(user_threshold, dis_threshold, sim_threshold)
     threshold_suffix = build_threshold_suffix(user_threshold, dis_threshold, sim_threshold)
     
-    # Default to all categories if not specified
+    category_aliases = {
+        'both-active': 'both_active',
+        'both_active': 'both_active',
+        'scaffold-only': 'only_scaf',
+        'scaffold_only': 'only_scaf',
+        'only-scaf': 'only_scaf',
+        'only_scaf': 'only_scaf',
+        'ph4-only': 'only_fp',
+        'ph4_only': 'only_fp',
+        'fp-only': 'only_fp',
+        'only-fp': 'only_fp',
+        'only_fp': 'only_fp',
+        'non-active': 'non_active',
+        'non_active': 'non_active',
+    }
+    category_labels = {
+        'both_active': 'both-active',
+        'only_scaf': 'scaffold-only',
+        'only_fp': 'ph4-only',
+        'non_active': 'non-active',
+    }
+
+    # Default to the three active-overlap categories if not specified.
     if categories is None:
         categories = ['both_active', 'only_scaf', 'only_fp']
+    else:
+        categories = [category_aliases.get(cat, cat) for cat in categories]
     
     sns.set(style="whitegrid")
     palette = {
@@ -1622,7 +1660,8 @@ def plot_activity_barplots(
                 values = cat_data['value'].values
                 offset = (i - len(categories)/2 + 0.5) * bar_width
                 ax.bar(x_positions + offset, values, width=bar_width,
-                      color=palette.get(category, '#999999'), label=category)
+                      color=palette.get(category, '#999999'),
+                      label=category_labels.get(category, category))
         
         ax.set_xticks(x_positions)
         ax.set_xticklabels(x_labels, rotation=45, ha="right")
@@ -1638,8 +1677,9 @@ def plot_activity_barplots(
         else:
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{int(y):,}'))
     
-    plot_subplot(axes[0], df_csk_melt, f"CSK scaffold - {', '.join(categories)}")
-    plot_subplot(axes[1], df_murcko_melt, f"Murcko scaffold - {', '.join(categories)}")
+    display_categories = [category_labels.get(category, category) for category in categories]
+    plot_subplot(axes[0], df_csk_melt, f"CSK scaffold - {', '.join(display_categories)}")
+    plot_subplot(axes[1], df_murcko_melt, f"Murcko scaffold - {', '.join(display_categories)}")
     
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     
@@ -1683,8 +1723,10 @@ def plot_combined_heatmap(
         base_path: Base data path
         title: Optional title for the plot
         save_name: Optional custom save name
-        metrics: List of metrics to plot (default: all)
-                Options: ['both_active', 'only_scaf', 'only_fp', 'non_active']
+        metrics: List of metrics to plot (default: main active categories)
+                Internal options: ['both_active', 'only_scaf', 'only_fp', 'non_active']
+                Display aliases are also accepted:
+                ['both-active', 'scaffold-only', 'ph4-only', 'non-active']
         use_percentage: If True, show percentages; if False, show absolute numbers
         total_count: Total number of compounds (for percentage calculation)
         dis_threshold: Threshold for dis split
@@ -1701,14 +1743,32 @@ def plot_combined_heatmap(
                      'GB_GA_log_p_mut_r_0.5_250k', 'GB_GA_mut_r_0.01_250k',
                      'GB_GA_mut_r_0.5_250k', 'addcarbon_250k', 'enamine_250k']
     
-    # Default to all activity metrics if not specified
+    metric_aliases = {
+        'both-active': 'both_active',
+        'both_active': 'both_active',
+        'scaffold-only': 'only_scaf',
+        'scaffold_only': 'only_scaf',
+        'only-scaf': 'only_scaf',
+        'only_scaf': 'only_scaf',
+        'ph4-only': 'only_fp',
+        'ph4_only': 'only_fp',
+        'fp-only': 'only_fp',
+        'only-fp': 'only_fp',
+        'only_fp': 'only_fp',
+        'non-active': 'non_active',
+        'non_active': 'non_active',
+    }
+
+    # Default to the three active-overlap categories if not specified.
     if metrics is None:
         metrics = ['both_active', 'only_scaf', 'only_fp']
+    else:
+        metrics = [metric_aliases.get(metric, metric) for metric in metrics]
 
     metric_display_names = {
         'both_active': 'both-active',
         'only_scaf': 'scaffold-only',
-        'only_fp': 'pharm-only',
+        'only_fp': 'ph4-only',
         'non_active': 'inactive',
     }
     
@@ -2096,6 +2156,8 @@ def process_for_umap(
     include_non_active: bool = True,
     non_active_samples: int = DEFAULT_UMAP_NON_ACTIVE_SAMPLE,
     use_stratified_sampling: bool = True,
+    morgan_radius: int = DEFAULT_MORGAN_RADIUS,
+    morgan_nbits: int = DEFAULT_MORGAN_NBITS,
     dis_threshold: float = DEFAULT_THRESHOLDS["dis"],
     sim_threshold: float = DEFAULT_THRESHOLDS["sim"],
     ):
@@ -2117,6 +2179,8 @@ def process_for_umap(
         include_non_active: Whether to include sampled inactive output molecules
         non_active_samples: Maximum number of inactive output molecules
         use_stratified_sampling: If True, use the stratified UMAP workflow as the default canonical mode
+        morgan_radius: Morgan fingerprint radius
+        morgan_nbits: Morgan fingerprint size
         dis_threshold: Threshold for dis split
         sim_threshold: Threshold for sim split
     """
@@ -2189,9 +2253,10 @@ def process_for_umap(
     print(f"Total compounds: {len(combined_smiles)}")
     
     # Generate fingerprints in parallel
-    print("Generating Morgan fingerprints...")
+    print(f"Generating Morgan fingerprints (radius={morgan_radius}, nbits={morgan_nbits})...")
+    morgan_worker = partial(smiles_to_morgan, radius=morgan_radius, nbits=morgan_nbits)
     with Pool(processes=ncpus) as pool:
-        fingerprints = pool.map(smiles_to_morgan, combined_smiles, chunksize=100)
+        fingerprints = pool.map(morgan_worker, combined_smiles, chunksize=100)
     
     fingerprints = np.array(fingerprints)
     print(f"Fingerprints shape: {fingerprints.shape}")
@@ -2261,6 +2326,8 @@ def process_umap_batch(
     include_non_active: bool = True,
     non_active_samples: int = DEFAULT_UMAP_NON_ACTIVE_SAMPLE,
     use_stratified_sampling: bool = True,
+    morgan_radius: int = DEFAULT_MORGAN_RADIUS,
+    morgan_nbits: int = DEFAULT_MORGAN_NBITS,
     dis_threshold: float = DEFAULT_THRESHOLDS["dis"],
     sim_threshold: float = DEFAULT_THRESHOLDS["sim"],
     ):
@@ -2280,6 +2347,8 @@ def process_umap_batch(
         include_non_active: Whether to include sampled inactive output molecules
         non_active_samples: Maximum number of inactive output molecules
         use_stratified_sampling: If True, use the stratified UMAP workflow as the default canonical mode
+        morgan_radius: Morgan fingerprint radius
+        morgan_nbits: Morgan fingerprint size
         dis_threshold: Threshold for dis split
         sim_threshold: Threshold for sim split
     """
@@ -2311,6 +2380,8 @@ def process_umap_batch(
                                 include_non_active=include_non_active,
                                 non_active_samples=non_active_samples,
                                 use_stratified_sampling=use_stratified_sampling,
+                                morgan_radius=morgan_radius,
+                                morgan_nbits=morgan_nbits,
                                 dis_threshold=dis_threshold,
                                 sim_threshold=sim_threshold,
                             )
@@ -2320,6 +2391,216 @@ def process_umap_batch(
     
     print(f"\n{'='*70}")
     print(f"BATCH UMAP PROCESSING COMPLETE")
+    print(f"{'='*70}\n")
+
+
+def process_for_tsne(
+    receptor: str,
+    type_scaffold: str,
+    type_cluster: str,
+    number: int,
+    generator: str,
+    user_threshold: Optional[float] = None,
+    base_path: str = '../data',
+    ncpus: int = None,
+    max_output_samples: int = 30000,
+    per_active_category_samples: int = DEFAULT_UMAP_ACTIVE_CATEGORY_SAMPLE,
+    include_non_active: bool = True,
+    non_active_samples: int = DEFAULT_UMAP_NON_ACTIVE_SAMPLE,
+    use_stratified_sampling: bool = True,
+    morgan_radius: int = DEFAULT_MORGAN_RADIUS,
+    morgan_nbits: int = DEFAULT_MORGAN_NBITS,
+    pca_components: int = 50,
+    perplexity: float = 30.0,
+    tsne_init: str = "random",
+    random_state: int = 42,
+    dis_threshold: float = DEFAULT_THRESHOLDS["dis"],
+    sim_threshold: float = DEFAULT_THRESHOLDS["sim"],
+):
+    """
+    Process SMILES datasets, compute Morgan fingerprints, reduce them by PCA,
+    and generate a t-SNE embedding.
+
+    The input sampling mirrors `process_for_umap`: IS and RS are kept, while
+    output-set categories are sampled in a reproducible stratified way.
+    """
+    if ncpus is None:
+        ncpus = max(1, cpu_count() - 2)
+
+    print(f"\n{'='*60}")
+    print(f"Processing t-SNE for {generator}")
+    print(f"Receptor: {receptor}, Scaffold: {type_scaffold}")
+    print(f"Cluster: {type_cluster}_{number}")
+    threshold = resolve_threshold(type_cluster, user_threshold, dis_threshold, sim_threshold)
+    threshold_dirs = resolve_threshold_dir_candidates(
+        type_cluster,
+        user_threshold,
+        dis_threshold,
+        sim_threshold,
+    )
+    threshold_dir = threshold_dirs[0]
+    print(f"Using threshold: {threshold}")
+    print(f"{'='*60}")
+
+    print("Loading datasets...")
+    IS = pd.read_csv(
+        f'{base_path}/input_recall_sets/{receptor}/cIS_{receptor}_{type_cluster}_{number}.csv',
+        names=['smiles']
+    )
+    RS = pd.read_csv(
+        f'{base_path}/input_recall_sets/{receptor}/cRS_{receptor}_{type_cluster}_{number}.csv',
+        names=['smiles']
+    )
+
+    os_file = None
+    for candidate_dir in threshold_dirs:
+        candidate_file = os.path.join(
+            _overlap_dir(base_path, receptor, "merged", candidate_dir, generator),
+            f'merged_df_{generator}_{type_scaffold}_{type_cluster}_{number}.csv',
+        )
+        if os.path.exists(candidate_file):
+            os_file = candidate_file
+            threshold_dir = candidate_dir
+            break
+
+    if os_file is None:
+        raise FileNotFoundError(
+            "Merged t-SNE input not found in any threshold directory: "
+            + ", ".join(threshold_dirs)
+        )
+
+    OS = pd.read_csv(os_file)
+    df = _build_umap_input_dataframe(
+        input_set_df=IS,
+        recall_set_df=RS,
+        output_set_df=OS,
+        active_categories=("both_active", "only_scaf", "only_fp"),
+        per_active_category_samples=per_active_category_samples,
+        include_non_active=include_non_active,
+        non_active_samples=non_active_samples,
+        use_stratified_sampling=use_stratified_sampling,
+        max_output_samples=max_output_samples,
+        random_state=random_state,
+    )
+
+    combined_smiles = df.smiles.tolist()
+    labels = df.activity_category.tolist()
+    print(f"Total compounds: {len(combined_smiles)}")
+
+    if len(combined_smiles) < 3:
+        raise ValueError("t-SNE requires at least 3 compounds after sampling.")
+
+    print(f"Generating Morgan fingerprints (radius={morgan_radius}, nbits={morgan_nbits})...")
+    morgan_worker = partial(smiles_to_morgan, radius=morgan_radius, nbits=morgan_nbits)
+    with Pool(processes=ncpus) as pool:
+        fingerprints = pool.map(morgan_worker, combined_smiles, chunksize=100)
+
+    fingerprints = np.asarray(fingerprints, dtype=np.float32)
+    print(f"Fingerprints shape: {fingerprints.shape}")
+
+    n_components = min(int(pca_components), fingerprints.shape[1], len(fingerprints) - 1)
+    if n_components < 2:
+        raise ValueError("PCA before t-SNE requires at least 2 components.")
+
+    print(f"Running PCA before t-SNE (n_components={n_components})...")
+    pca_model = PCA(n_components=n_components, random_state=random_state)
+    pca_results = pca_model.fit_transform(fingerprints)
+
+    effective_perplexity = min(float(perplexity), max(1.0, (len(fingerprints) - 1) / 3.0))
+    print(
+        f"Running t-SNE "
+        f"(perplexity={effective_perplexity:.2f}, init={tsne_init}, random_state={random_state})..."
+    )
+    tsne_model = TSNE(
+        n_components=2,
+        perplexity=effective_perplexity,
+        init=tsne_init,
+        learning_rate="auto",
+        random_state=random_state,
+    )
+    tsne_results = tsne_model.fit_transform(pca_results)
+
+    tsne_df = pd.DataFrame(tsne_results, columns=['TSNE1', 'TSNE2'])
+    tsne_df['set_label'] = labels
+
+    folder = _tsne_dir(base_path, receptor, threshold_dir, generator)
+    os.makedirs(folder, exist_ok=True)
+
+    output_file = f"{folder}/tsne_results_{generator}_{type_scaffold}_{type_cluster}_{number}.csv"
+    tsne_df.to_csv(output_file, index=False)
+
+    print(f"t-SNE results saved to: {output_file}")
+    print(f"{'='*60}\n")
+
+    return tsne_df
+
+
+def process_tsne_batch(
+    generators: List[str],
+    receptors: List[str],
+    scaffolds: List[str] = ['csk'],
+    splits: List[str] = ['dis', 'sim'],
+    clusters: List[int] = [0, 1, 2, 3, 4],
+    user_threshold: Optional[float] = None,
+    base_path: str = '../data',
+    ncpus: int = None,
+    per_active_category_samples: int = DEFAULT_UMAP_ACTIVE_CATEGORY_SAMPLE,
+    include_non_active: bool = True,
+    non_active_samples: int = DEFAULT_UMAP_NON_ACTIVE_SAMPLE,
+    use_stratified_sampling: bool = True,
+    morgan_radius: int = DEFAULT_MORGAN_RADIUS,
+    morgan_nbits: int = DEFAULT_MORGAN_NBITS,
+    pca_components: int = 50,
+    perplexity: float = 30.0,
+    tsne_init: str = "random",
+    random_state: int = 42,
+    dis_threshold: float = DEFAULT_THRESHOLDS["dis"],
+    sim_threshold: float = DEFAULT_THRESHOLDS["sim"],
+):
+    """Process t-SNE embeddings for multiple generators, receptors, and clusters."""
+    print(f"\n{'='*70}")
+    print("BATCH t-SNE PROCESSING")
+    print(f"{'='*70}")
+    print(f"Generators: {len(generators)}")
+    print(f"Receptors: {len(receptors)}")
+    print(f"Total tasks: {len(generators) * len(receptors) * len(scaffolds) * len(splits) * len(clusters)}")
+    print(f"Threshold directory: {build_threshold_dirname(user_threshold, dis_threshold, sim_threshold)}")
+    print(f"{'='*70}\n")
+
+    for receptor in receptors:
+        for generator in generators:
+            for scaffold in scaffolds:
+                for split in splits:
+                    for cluster in clusters:
+                        try:
+                            process_for_tsne(
+                                receptor=receptor,
+                                type_scaffold=scaffold,
+                                type_cluster=split,
+                                number=cluster,
+                                generator=generator,
+                                user_threshold=user_threshold,
+                                base_path=base_path,
+                                ncpus=ncpus,
+                                per_active_category_samples=per_active_category_samples,
+                                include_non_active=include_non_active,
+                                non_active_samples=non_active_samples,
+                                use_stratified_sampling=use_stratified_sampling,
+                                morgan_radius=morgan_radius,
+                                morgan_nbits=morgan_nbits,
+                                pca_components=pca_components,
+                                perplexity=perplexity,
+                                tsne_init=tsne_init,
+                                random_state=random_state,
+                                dis_threshold=dis_threshold,
+                                sim_threshold=sim_threshold,
+                            )
+                        except Exception as e:
+                            print(f"Error processing {generator}, {receptor}, {scaffold}, {split}, {cluster}: {e}")
+                            continue
+
+    print(f"\n{'='*70}")
+    print("BATCH t-SNE PROCESSING COMPLETE")
     print(f"{'='*70}\n")
 
 
@@ -2442,6 +2723,103 @@ def plot_umap_single(
     os.makedirs(folder, exist_ok=True)
     
     filename = f'umap_single_{generator}_{type_scaffold}_{type_cluster}_{number}_{categories_str}.png'
+    plt.savefig(f'{folder}/{filename}', format='png', dpi=dpi, bbox_inches='tight')
+    print(f"Saved: {folder}/{filename}")
+    plt.show()
+
+
+def plot_tsne_single(
+    generator: str,
+    type_scaffold: str,
+    type_cluster: str,
+    number: int,
+    receptor: str,
+    user_threshold: Optional[float] = None,
+    base_path: str = '../data',
+    categories: List[str] = None,
+    include_non_active: bool = False,
+    figsize: Tuple[int, int] = (14, 10),
+    dpi: int = 300,
+    dis_threshold: float = DEFAULT_THRESHOLDS["dis"],
+    sim_threshold: float = DEFAULT_THRESHOLDS["sim"],
+):
+    """Visualize t-SNE results for a single cluster with customizable categories."""
+    threshold = resolve_threshold(type_cluster, user_threshold, dis_threshold, sim_threshold)
+    threshold_dirs = resolve_threshold_dir_candidates(
+        type_cluster,
+        user_threshold,
+        dis_threshold,
+        sim_threshold,
+    )
+    threshold_dir = threshold_dirs[0]
+    tsne_file = None
+    for candidate_dir in threshold_dirs:
+        candidate_file = os.path.join(
+            _tsne_dir(base_path, receptor, candidate_dir, generator),
+            f"tsne_results_{generator}_{type_scaffold}_{type_cluster}_{number}.csv",
+        )
+        if os.path.exists(candidate_file):
+            tsne_file = candidate_file
+            threshold_dir = candidate_dir
+            break
+
+    if tsne_file is None:
+        print(
+            "t-SNE file not found in any threshold directory: "
+            + ", ".join(threshold_dirs)
+        )
+        return
+
+    tsne_df = pd.read_csv(tsne_file)
+
+    if categories is None:
+        categories = ['IS', 'RS', 'only_scaf', 'only_fp', 'both_active']
+        if include_non_active:
+            categories.append('non_active')
+    elif include_non_active and 'non_active' not in categories:
+        categories = list(categories) + ['non_active']
+
+    tsne_df = tsne_df[tsne_df['set_label'].isin(categories)]
+    label_styles = UMAP_LABEL_STYLES
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    for label in categories:
+        if label in tsne_df['set_label'].unique():
+            subset = tsne_df[tsne_df['set_label'] == label]
+            style = label_styles.get(
+                label,
+                {'color': 'gray', 'marker': 'o', 'size': 50, 'alpha': 0.6, 'edgecolor': 'white', 'linewidth': 0.5},
+            )
+            display_name = UMAP_LABEL_DISPLAY_NAMES.get(label, label)
+            ax.scatter(
+                subset['TSNE1'], subset['TSNE2'],
+                label=f"{display_name} (n={len(subset)})",
+                color=style['color'],
+                s=style['size'],
+                marker=style['marker'],
+                alpha=style['alpha'],
+                edgecolors=style.get('edgecolor', 'white'),
+                linewidths=style.get('linewidth', 0.5)
+            )
+
+    ax.set_xlabel('t-SNE Component 1', fontsize=14, fontweight='bold')
+    ax.set_ylabel('t-SNE Component 2', fontsize=14, fontweight='bold')
+    ax.set_title(
+        f'{receptor.replace("_", " ")} - {generator}\n'
+        f'{type_scaffold.upper()} scaffold, {type_cluster}, cluster {number}, threshold {threshold}',
+        fontsize=16, fontweight='bold', pad=20
+    )
+    ax.legend(fontsize=11, loc='best', frameon=True, fancybox=True, shadow=True)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.set_facecolor('#f8f8f8')
+
+    plt.tight_layout()
+
+    categories_str = '_'.join(categories)
+    folder = _tsne_dir(base_path, receptor, "img", "single_plot", threshold_dir)
+    os.makedirs(folder, exist_ok=True)
+
+    filename = f'tsne_single_{generator}_{type_scaffold}_{type_cluster}_{number}_{categories_str}.png'
     plt.savefig(f'{folder}/{filename}', format='png', dpi=dpi, bbox_inches='tight')
     print(f"Saved: {folder}/{filename}")
     plt.show()
@@ -3302,7 +3680,7 @@ def plot_metric_correlations(
         mode_label = merged["comparison_mode"].iat[0]
         scaffold_label = "mean(CSK, Murcko)" if mode_label == "mean" else mode_label.upper()
         ax.set_xlabel(f"{metric} scaffold metric ({scaffold_label})", fontsize=10)
-        ax.set_ylabel(f"{metric} RDKit pharmacophore", fontsize=10)
+        ax.set_ylabel(f"{metric} RDKit ph4", fontsize=10)
         ax.set_xlim(min_val - pad, max_val + pad)
         ax.set_ylim(min_val - pad, max_val + pad)
         ax.grid(alpha=0.22, linewidth=0.5)
@@ -3330,7 +3708,7 @@ def plot_metric_correlations(
     mode_label = "mean(CSK, Murcko)" if comparison_mode == "mean" else comparison_mode
     title = (
         f"{title_prefix}\n" if title_prefix else ""
-    ) + f"{receptor} | {split} | {mode_label} vs RDKit pharmacophore (threshold {threshold:g})"
+    ) + f"{receptor} | {split} | {mode_label} vs RDKit ph4 (threshold {threshold:g})"
     fig.suptitle(title, fontsize=14, y=0.98)
     fig.legend(
         handles=legend_handles,
@@ -3444,7 +3822,7 @@ def plot_overview_heatmap(
 
                 if metric_idx == 0:
                     if col_idx == 0:
-                        ax.set_ylabel("Pharmacophore-based metrics", fontsize=11)
+                        ax.set_ylabel("ph4-based metrics", fontsize=11)
                         ax.set_yticklabels(["Spearman rho", "Pearson r"], rotation=0, fontsize=10)
                     else:
                         ax.set_ylabel("")
@@ -3701,7 +4079,7 @@ MODE_SPECS = {
         "pattern": re.compile(
             r"compare_res_fp_to_active_scaf_(?P<generator>.+)_(?P<scaffold_type>csk|murcko)_(?P<split>dis|sim)_(?P<cluster>\d+)\.csv$"
         ),
-        "query_category": "only_fp",
+        "query_category": "ph4-only",
         "target_modality": "scaffold",
     },
     "scaf_to_fp": {
@@ -3709,14 +4087,25 @@ MODE_SPECS = {
         "pattern": re.compile(
             r"compare_res_scaf_to_active_fp_(?P<generator>.+)_(?P<scaffold_type>csk|murcko)_(?P<split>dis|sim)_(?P<cluster>\d+)\.csv$"
         ),
-        "query_category": "only_scaf",
+        "query_category": "scaffold-only",
         "target_modality": "pharmacophore",
     },
 }
 
 MODE_DISPLAY_NAMES = {
-    "fp_to_scaf": "pharm-only -> scaffold",
-    "scaf_to_fp": "scaffold-only -> pharm",
+    "fp_to_scaf": "ph4-only -> scaffold",
+    "scaf_to_fp": "scaffold-only -> ph4",
+}
+
+CROSS_MODALITY_CATEGORY_LABELS = {
+    "only_fp": "ph4-only",
+    "only-fp": "ph4-only",
+    "ph4_only": "ph4-only",
+    "ph4-only": "ph4-only",
+    "only_scaf": "scaffold-only",
+    "only-scaf": "scaffold-only",
+    "scaffold_only": "scaffold-only",
+    "scaffold-only": "scaffold-only",
 }
 
 
@@ -3768,6 +4157,12 @@ def load_cross_modality_results(
 
                 df = pd.read_csv(csv_path)
                 df = _drop_image_columns(df)
+                for category_col in ["activity_category", "query_category"]:
+                    if category_col in df.columns:
+                        df[category_col] = (
+                            df[category_col]
+                            .replace(CROSS_MODALITY_CATEGORY_LABELS)
+                        )
                 df["receptor"] = receptor
                 df["mode"] = mode
                 df["query_category"] = spec["query_category"]
@@ -4073,7 +4468,7 @@ UMAP_LABEL_DISPLAY_NAMES = {
     'IS': 'IS',
     'RS': 'RS',
     'only_scaf': 'scaffold-only',
-    'only_fp': 'pharm-only',
+    'only_fp': 'ph4-only',
     'both_active': 'both-active',
     'non_active': 'inactive',
 }
@@ -4279,6 +4674,205 @@ def plot_umap_grid_print(
     filename = f'umap_grid_print_{generator}_{type_scaffold}_{type_cluster}.png'
     plt.savefig(os.path.join(folder, filename), format='png', dpi=dpi, bbox_inches='tight')
     filename = f'umap_grid_print_{generator}_{type_scaffold}_{type_cluster}.svg'
+    plt.savefig(os.path.join(folder, filename), format='svg', dpi=dpi, bbox_inches='tight')
+    print(f'Saved: {os.path.join(folder, filename)}')
+    plt.show()
+
+
+def _load_tsne_results_for_print(
+    generator: str,
+    type_scaffold: str,
+    type_cluster: str,
+    number: int,
+    receptor: str,
+    user_threshold: Optional[float] = None,
+    base_path: str = '../data',
+    dis_threshold: float = DEFAULT_THRESHOLDS['dis'],
+    sim_threshold: float = DEFAULT_THRESHOLDS['sim'],
+) -> tuple[pd.DataFrame, str, float]:
+    threshold = resolve_threshold(type_cluster, user_threshold, dis_threshold, sim_threshold)
+    threshold_dirs = resolve_threshold_dir_candidates(
+        type_cluster,
+        user_threshold,
+        dis_threshold,
+        sim_threshold,
+    )
+
+    for candidate_dir in threshold_dirs:
+        candidate_file = os.path.join(
+            _tsne_dir(base_path, receptor, candidate_dir, generator),
+            f'tsne_results_{generator}_{type_scaffold}_{type_cluster}_{number}.csv',
+        )
+        if os.path.exists(candidate_file):
+            return pd.read_csv(candidate_file), candidate_dir, threshold
+
+    raise FileNotFoundError(
+        't-SNE file not found in any threshold directory: ' + ', '.join(threshold_dirs)
+    )
+
+
+def _plot_tsne_points(
+    ax,
+    tsne_df: pd.DataFrame,
+    categories: Iterable[str],
+    legend_fontsize: int = 9,
+    title: str | None = None,
+    title_fontsize: int = 12,
+    axis_label_fontsize: int = 10,
+    tick_label_fontsize: int = 10,
+):
+    selected = [label for label in categories if label in set(tsne_df['set_label'])]
+    for label in selected:
+        subset = tsne_df[tsne_df['set_label'] == label]
+        style = UMAP_LABEL_STYLES.get(
+            label,
+            {'color': 'gray', 'marker': 'o', 'size': 40, 'alpha': 0.5, 'edgecolor': 'white', 'linewidth': 0.3},
+        )
+        display_name = UMAP_LABEL_DISPLAY_NAMES.get(label, label)
+        ax.scatter(
+            subset['TSNE1'],
+            subset['TSNE2'],
+            label=f"{display_name} (n={len(subset)})",
+            color=style['color'],
+            s=style['size'],
+            marker=style['marker'],
+            alpha=style['alpha'],
+            edgecolors=style.get('edgecolor', 'white'),
+            linewidths=style.get('linewidth', 0.3),
+        )
+
+    if title is not None:
+        ax.set_title(title, fontsize=title_fontsize, fontweight='bold')
+    ax.set_xlabel('t-SNE1', fontsize=axis_label_fontsize)
+    ax.set_ylabel('t-SNE2', fontsize=axis_label_fontsize)
+    ax.tick_params(axis='both', labelsize=tick_label_fontsize)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.set_facecolor('#f8f8f8')
+    if selected:
+        ax.legend(fontsize=legend_fontsize, loc='best')
+
+
+def plot_tsne_grid_print(
+    generator: str,
+    type_scaffold: str,
+    type_cluster: str,
+    receptor: str,
+    user_threshold: Optional[float] = None,
+    base_path: str = '../data',
+    clusters: List[int] = [0, 1, 2, 3, 4],
+    categories: List[str] = None,
+    include_non_active: bool = True,
+    title: str | None = None,
+    figsize_per_row: float = 9,
+    dpi: int = 300,
+    dis_threshold: float = DEFAULT_THRESHOLDS['dis'],
+    sim_threshold: float = DEFAULT_THRESHOLDS['sim'],
+):
+    threshold = resolve_threshold(type_cluster, user_threshold, dis_threshold, sim_threshold)
+    threshold_dirs = resolve_threshold_dir_candidates(
+        type_cluster,
+        user_threshold,
+        dis_threshold,
+        sim_threshold,
+    )
+    threshold_dir = threshold_dirs[0]
+    if categories is None:
+        categories = ['IS', 'RS', 'only_scaf', 'only_fp', 'both_active']
+        if include_non_active:
+            categories.append('non_active')
+    elif include_non_active and 'non_active' not in categories:
+        categories = list(categories) + ['non_active']
+
+    all_data = []
+    for number in clusters:
+        loaded = False
+        for candidate_dir in threshold_dirs:
+            candidate_file = os.path.join(
+                _tsne_dir(base_path, receptor, candidate_dir, generator),
+                f'tsne_results_{generator}_{type_scaffold}_{type_cluster}_{number}.csv',
+            )
+            if os.path.exists(candidate_file):
+                df = pd.read_csv(candidate_file)
+                all_data.append(df)
+                threshold_dir = candidate_dir
+                loaded = True
+                break
+        if not loaded:
+            print(f'Warning: t-SNE file not found for cluster {number}')
+
+    if not all_data:
+        print('No t-SNE data found!')
+        return
+
+    combined = pd.concat(all_data, ignore_index=True)
+    x_min, x_max = combined['TSNE1'].min(), combined['TSNE1'].max()
+    y_min, y_max = combined['TSNE2'].min(), combined['TSNE2'].max()
+
+    x_padding = (x_max - x_min) * 0.05
+    y_padding = (y_max - y_min) * 0.05
+    x_min, x_max = x_min - x_padding, x_max + x_padding
+    y_min, y_max = y_min - y_padding, y_max + y_padding
+
+    fig, axes = plt.subplots(len(clusters), 2, figsize=(30, figsize_per_row * len(clusters)))
+
+    if len(clusters) == 1:
+        axes = axes.reshape(1, -1)
+
+    for row_idx, number in enumerate(clusters):
+        tsne_df = None
+        for candidate_dir in threshold_dirs:
+            candidate_file = os.path.join(
+                _tsne_dir(base_path, receptor, candidate_dir, generator),
+                f'tsne_results_{generator}_{type_scaffold}_{type_cluster}_{number}.csv',
+            )
+            if os.path.exists(candidate_file):
+                tsne_df = pd.read_csv(candidate_file)
+                threshold_dir = candidate_dir
+                break
+        if tsne_df is None:
+            continue
+
+        ax = axes[row_idx, 0]
+        _plot_tsne_points(
+            ax,
+            tsne_df,
+            UMAP_VIEW_CATEGORIES['reference'],
+            legend_fontsize=18,
+            title=f'Cluster {number}: Reference Sets',
+            title_fontsize=20,
+            axis_label_fontsize=20,
+            tick_label_fontsize=15,
+        )
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+
+        ax = axes[row_idx, 1]
+        context_categories = [label for label in UMAP_VIEW_CATEGORIES['context'] if label in categories]
+        _plot_tsne_points(
+            ax,
+            tsne_df,
+            context_categories,
+            legend_fontsize=18,
+            title=f'Cluster {number}: Full Context',
+            title_fontsize=20,
+            axis_label_fontsize=20,
+            tick_label_fontsize=15,
+        )
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+
+    if title is not None:
+        fig.suptitle(title, fontsize=20, fontweight='bold', y=0.995)
+        plt.tight_layout(rect=[0, 0, 1, 0.985])
+    else:
+        plt.tight_layout()
+
+    folder = _tsne_dir(base_path, receptor, 'img', 'grid_plot_print', threshold_dir)
+    os.makedirs(folder, exist_ok=True)
+
+    filename = f'tsne_grid_print_{generator}_{type_scaffold}_{type_cluster}.png'
+    plt.savefig(os.path.join(folder, filename), format='png', dpi=dpi, bbox_inches='tight')
+    filename = f'tsne_grid_print_{generator}_{type_scaffold}_{type_cluster}.svg'
     plt.savefig(os.path.join(folder, filename), format='svg', dpi=dpi, bbox_inches='tight')
     print(f'Saved: {os.path.join(folder, filename)}')
     plt.show()
