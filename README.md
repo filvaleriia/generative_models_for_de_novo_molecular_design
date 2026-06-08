@@ -42,19 +42,19 @@ Three metrics are used in both evaluation frameworks. The metric formula stays t
 ### structural unit Recovery Score (RS)
 
 $$
-RS = \frac{\text{Unique active units in the OS}}{\text{Unique active units in the RS}}
+RS = \frac{\text{Unique active structural units in the OS}}{\text{Unique active structural units in the RS}}
 $$
 
 ### SEt structural unit Diversity (SED)
 
 $$
-SED = \frac{\text{Unique units in the OS}}{c_{OS}}
+SED = \frac{\text{Unique structural units in the OS}}{c_{OS}}
 $$
 
 ### Absolute SEt structural unit Recall (ASER)
 
 $$
-ASER = \frac{\text{Count of active units in the OS}}{c_{OS}}
+ASER = \frac{\text{Count of active structural units in the OS}}{c_{OS}}
 $$
 
 ## Structural Representations
